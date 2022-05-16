@@ -21,9 +21,8 @@
 
 #include "log.h"
 #include "mcs.h"
-#include "rdp.h"
-#include "sec.h"
 #include "tpkt.h"
+#include "sec.h"
 
 static int
 v2r_mcs_parse_ber_encoding(v2r_packet_t *p, uint16_t identifier,
@@ -74,16 +73,6 @@ v2r_mcs_parse_client_core_data(v2r_packet_t *p, v2r_mcs_t *m)
 	V2R_PACKET_READ_UINT32_LE(p, m->keyboard_layout);
 	v2r_log_info("client keyboard layout: 0x%08x", m->keyboard_layout);
 
-	return 0;
-}
-
-static int
-v2r_mcs_parse_client_security_data(v2r_packet_t *p, v2r_mcs_t *m)
-{
-	/* encryptionMethods */
-	V2R_PACKET_READ_UINT32_LE(p, m->encryption_methods);
-	v2r_log_info("client support encryption methods: 0x%x",
-				 m->encryption_methods);
 	return 0;
 }
 
@@ -183,9 +172,6 @@ v2r_mcs_recv_conn_init(v2r_packet_t *p, v2r_mcs_t *m)
 			}
 			break;
 		case CS_SECURITY:
-			if (v2r_mcs_parse_client_security_data(p, m) == -1) {
-				goto fail;
-			}
 			break;
 		case CS_NET:
 			if (v2r_mcs_parse_client_network_data(p, m) == -1) {
@@ -226,52 +212,6 @@ v2r_mcs_write_ber_encoding(v2r_packet_t *p, uint16_t identifier,
 }
 
 static int
-v2r_mcs_write_server_security_data(v2r_packet_t *p, v2r_mcs_t *m)
-{
-	uint8_t *p_length = NULL, *p_current = NULL;
-
-	V2R_PACKET_WRITE_UINT16_LE(p, SC_SECURITY);
-	p_length = p->current;
-	V2R_PACKET_SEEK_UINT16(p);
-	V2R_PACKET_WRITE_UINT32_LE(p, m->session->opt->encryption_method);
-	if (m->session->opt->encryption_method == ENCRYPTION_METHOD_NONE) {
-		V2R_PACKET_WRITE_UINT32_LE(p, ENCRYPTION_LEVEL_NONE);
-	} else {
-		V2R_PACKET_WRITE_UINT32_LE(p, ENCRYPTION_LEVEL_CLIENT_COMPATIBLE);
-	}
-	if (m->session->opt->encryption_method == ENCRYPTION_METHOD_NONE) {
-		/* serverRandomLen */
-		V2R_PACKET_WRITE_UINT32_LE(p, 0);
-		/* serverCertLen */
-		V2R_PACKET_WRITE_UINT32_LE(p, 0);
-	} else {
-		/* serverRandomLen */
-		V2R_PACKET_WRITE_UINT32_LE(p, 32);
-		/* serverCertLen, the length of server certificate is fixed 184 */
-		V2R_PACKET_WRITE_UINT32_LE(p, 184);
-		/* serverRandom */
-		if (v2r_sec_generate_server_random(m->session->rdp->sec) == -1) {
-			goto fail;
-		}
-		V2R_PACKET_WRITE_N(p, m->session->rdp->sec->server_random,
-						   SERVER_RANDOM_LEN);
-		/* serverCertificate */
-		if (v2r_sec_write_server_certificate(m->session->rdp->sec, p) == -1) {
-			goto fail;
-		}
-	}
-	p_current = p->current;
-	p->current = p_length;
-	V2R_PACKET_WRITE_UINT16_LE(p, p_current - p_length + 2);
-	p->current = p_current;
-
-	return 0;
-
-fail:
-	return -1;
-}
-
-static int
 v2r_mcs_send_conn_resp(v2r_packet_t *p, v2r_mcs_t *m)
 {
 	v2r_packet_t *u = NULL;
@@ -301,9 +241,12 @@ v2r_mcs_send_conn_resp(v2r_packet_t *p, v2r_mcs_t *m)
 	V2R_PACKET_WRITE_UINT32_LE(u, 0x00000000);
 
 	/* Server Security Data */
-	if (v2r_mcs_write_server_security_data(u, m) == -1) {
-		goto fail;
-	}
+	V2R_PACKET_WRITE_UINT16_LE(u, SC_SECURITY);
+	V2R_PACKET_WRITE_UINT16_LE(u, 20);
+	V2R_PACKET_WRITE_UINT32_LE(u, ENCRYPTION_METHOD_NONE);
+	V2R_PACKET_WRITE_UINT32_LE(u, ENCRYPTION_LEVEL_NONE);
+	V2R_PACKET_WRITE_UINT32_LE(u, 0);
+	V2R_PACKET_WRITE_UINT32_LE(u, 0);
 
 	/* Server Network Data */
 	V2R_PACKET_WRITE_UINT16_LE(u, SC_NET);
@@ -462,15 +405,11 @@ fail:
 	return -1;
 }
 
-int
-v2r_mcs_build_conn(v2r_mcs_t *m, int client_fd)
+static int
+v2r_mcs_build_conn(v2r_mcs_t *m)
 {
 	uint16_t i = 0;
 	v2r_packet_t *p = NULL;
-
-	if (v2r_x224_build_conn(m->x224, client_fd) == -1) {
-		goto fail;
-	}
 
 	p = v2r_packet_init(8192);
 	if (p == NULL) {
@@ -517,7 +456,7 @@ fail:
 }
 
 v2r_mcs_t *
-v2r_mcs_init(v2r_session_t *session)
+v2r_mcs_init(int client_fd)
 {
 	v2r_mcs_t *m = NULL;
 
@@ -527,10 +466,12 @@ v2r_mcs_init(v2r_session_t *session)
 	}
 	memset(m, 0, sizeof(v2r_mcs_t));
 
-	m->session = session;
-
-	m->x224 = v2r_x224_init(session);
+	m->x224 = v2r_x224_init(client_fd);
 	if (m->x224 == NULL) {
+		goto fail;
+	}
+
+	if (v2r_mcs_build_conn(m) == -1) {
 		goto fail;
 	}
 

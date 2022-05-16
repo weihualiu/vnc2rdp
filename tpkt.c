@@ -16,10 +16,12 @@
  * limitations under the License.
  */
 
+#include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -27,8 +29,9 @@
 #include "tpkt.h"
 
 v2r_tpkt_t *
-v2r_tpkt_init(v2r_session_t *session)
+v2r_tpkt_init(int client_fd)
 {
+	int optval;
 	v2r_tpkt_t *t = NULL;
 
 	t = (v2r_tpkt_t *)malloc(sizeof(v2r_tpkt_t));
@@ -37,7 +40,13 @@ v2r_tpkt_init(v2r_session_t *session)
 	}
 	memset(t, 0, sizeof(v2r_tpkt_t));
 
-	t->session = session;
+	t->fd = client_fd;
+	/* disable Negle algorithm */
+	optval = 1;
+	if (setsockopt(t->fd, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval))
+		== -1) {
+		goto fail;
+	}
 
 	return t;
 
@@ -56,25 +65,6 @@ v2r_tpkt_destory(v2r_tpkt_t *t)
 		close(t->fd);
 	}
 	free(t);
-}
-
-int
-v2r_tpkt_build_conn(v2r_tpkt_t *t, int client_fd)
-{
-	int optval = 1;
-
-	t->fd = client_fd;
-
-	/* disable Nagle algorithm */
-	if (setsockopt(t->fd, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval))
-		== -1) {
-		goto fail;
-	}
-
-	return 0;
-
-fail:
-	return -1;
 }
 
 int

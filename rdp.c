@@ -289,14 +289,10 @@ v2r_rdp_send_font_map(v2r_rdp_t *r, v2r_packet_t *p)
 	return v2r_rdp_send(r, p, &hdr);
 }
 
-int
-v2r_rdp_build_conn(v2r_rdp_t *r, int client_fd)
+static int
+v2r_rdp_build_conn(v2r_rdp_t *r)
 {
 	v2r_packet_t *p = NULL;
-
-	if (v2r_sec_build_conn(r->sec, client_fd) == -1) {
-		goto fail;
-	}
 
 	p = v2r_packet_init(8192);
 	if (p == NULL) {
@@ -349,7 +345,7 @@ fail:
 }
 
 v2r_rdp_t *
-v2r_rdp_init(v2r_session_t *session)
+v2r_rdp_init(int client_fd, v2r_session_t *s)
 {
 	v2r_rdp_t *r = NULL;
 
@@ -359,15 +355,18 @@ v2r_rdp_init(v2r_session_t *session)
 	}
 	memset(r, 0, sizeof(v2r_rdp_t));
 
-	r->session = session;
+	r->session = s;
+
 	r->packet = v2r_packet_init(65535);
 	if (r->packet == NULL) {
 		goto fail;
 	}
-	r->sec = v2r_sec_init(session);
+
+	r->sec = v2r_sec_init(client_fd);
 	if (r->sec == NULL) {
 		goto fail;
 	}
+
 	r->allow_display_updates = ALLOW_DISPLAY_UPDATES;
 	/* find keymap by keyboard layout, if there is no fit keymap currently,
 	 * vnc2rdp will continue work but don't provide keyboard function */
@@ -375,6 +374,10 @@ v2r_rdp_init(v2r_session_t *session)
 	if (r->keymap == NULL) {
 		v2r_log_error("unsupported keyboard layout: 0x%08x",
 					  r->sec->mcs->keyboard_layout);
+	}
+
+	if (v2r_rdp_build_conn(r) == -1) {
+		goto fail;
 	}
 
 	return r;
@@ -534,33 +537,6 @@ v2r_rdp_send_palette_update(v2r_rdp_t *r, uint32_t number_colors,
 	/* paletteEntries */
 	V2R_PACKET_WRITE_N(r->packet, palette_entries,
 					   number_colors * sizeof(*palette_entries));
-
-	/* send packet */
-	V2R_PACKET_END(r->packet);
-	if (v2r_rdp_send(r, r->packet, &hdr) == -1) {
-		goto fail;
-	}
-
-	return 0;
-
-fail:
-	return -1;
-}
-
-int
-v2r_rdp_send_play_sound(v2r_rdp_t *r, uint32_t duration, uint32_t frequency)
-{
-	share_data_hdr_t hdr;
-
-	v2r_rdp_init_packet(r->packet, sizeof(share_data_hdr_t));
-
-	/* shareDataHeader */
-	hdr.share_ctrl_hdr.type = PDUTYPE_DATAPDU;
-	hdr.pdu_type2 = PDUTYPE2_PLAY_SOUND;
-	/* duration */
-	V2R_PACKET_WRITE_UINT32_LE(r->packet, duration);
-	/* frequency */
-	V2R_PACKET_WRITE_UINT32_LE(r->packet, frequency);
 
 	/* send packet */
 	V2R_PACKET_END(r->packet);

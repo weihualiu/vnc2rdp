@@ -16,7 +16,6 @@
  * limitations under the License.
  */
 
-#include <netinet/tcp.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -49,11 +48,13 @@ fail:
 static int
 v2r_vnc_recv1(v2r_vnc_t *v, size_t len)
 {
+	v2r_log_info("v2r_vnc_recv1() call 111");
 	int n = 0;
 
 	v2r_packet_reset(v->packet);
-
+    v2r_log_info("v2r_vnc_recv1() call 222");
 	n = recv(v->fd, v->packet->current, len, MSG_WAITALL);
+	v2r_log_info("v2r_vnc_rec1() n = %d", n);
 	if (n == -1 || n == 0) {
 		goto fail;
 	}
@@ -169,7 +170,6 @@ v2r_vnc_recv_server_init(v2r_vnc_t *v)
 		v->bpp = 15;
 		break;
 	case 8:
-		v->true_colour_flag = 0;
 		v->bpp = 8;
 		break;
 	}
@@ -180,19 +180,9 @@ fail:
 	return -1;
 }
 
-int
-v2r_vnc_build_conn(v2r_vnc_t *v, int server_fd)
+static int
+v2r_vnc_build_conn(v2r_vnc_t *v)
 {
-	int optval = 1;
-
-	v->fd = server_fd;
-
-	/* disable Nagle algorithm */
-	if (setsockopt(v->fd, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval))
-		== -1) {
-		goto fail;
-	}
-
 	/* receive ProtocolVersion */
 	if (v2r_vnc_recv(v) == -1) {
 		goto fail;
@@ -300,7 +290,7 @@ fail:
 }
 
 v2r_vnc_t *
-v2r_vnc_init(v2r_session_t *s)
+v2r_vnc_init(int server_fd, v2r_session_t *s)
 {
 	v2r_vnc_t *v = NULL;
 
@@ -311,12 +301,18 @@ v2r_vnc_init(v2r_session_t *s)
 	memset(v, 0, sizeof(v2r_vnc_t));
 
 	v->session = s;
+
+	v->fd = server_fd;
 	v->packet = v2r_packet_init(65535);
 	if (v->packet == NULL) {
 		goto fail;
 	}
 	v->buffer = NULL;
 	v->buffer_size = 0;
+
+	if (v2r_vnc_build_conn(v) == -1) {
+		goto fail;
+	}
 
 	return v;
 
@@ -367,14 +363,17 @@ v2r_vnc_process_raw_encoding(v2r_vnc_t *v, uint16_t x, uint16_t y,
 	/* if data size is larger than vnc packet's buffer, 
 	 * init a new packet with a larger buffer */
 	if (data_size > v->packet->max_len) {
+		v2r_log_error("data_size > v->packet->max_len");
 		v2r_packet_destory(v->packet);
 		v->packet = v2r_packet_init(data_size);
 		if (v->packet == NULL) {
+			v2r_log_error("failed to allocate memory for swap buffer");
 			goto fail;
 		}
 	}
 	/* and realloc a new buffer for VNC image upside down */
 	if (rdp_data_size > v->buffer_size) {
+		v2r_log_error("rdp_data_size > v->buffer_size");
 		v->buffer_size = rdp_data_size;
 		v->buffer = (uint8_t *)realloc(v->buffer, v->buffer_size);
 		if (v->buffer == NULL) {
@@ -474,6 +473,7 @@ v2r_vnc_process_framebuffer_update(v2r_vnc_t *v)
 	//v2r_log_debug("receive framebuffer update with %d rects", nrects);
 
 	for (i = 0; i < nrects; i++) {
+		v2r_log_info("receive framebuffer update with %d rects", i);
 		if (v2r_vnc_recv1(v, 12) == -1) {
 			goto fail;
 		}
@@ -482,9 +482,9 @@ v2r_vnc_process_framebuffer_update(v2r_vnc_t *v)
 		V2R_PACKET_READ_UINT16_BE(v->packet, w);
 		V2R_PACKET_READ_UINT16_BE(v->packet, h);
 		V2R_PACKET_READ_UINT32_BE(v->packet, encoding_type);
-		//v2r_log_debug("rect %d of %d: pos: %d,%d size: %dx%d encoding: %d",
-		//			  i + 1, nrects, x, y, w, h, encoding_type);
-
+		v2r_log_debug("rect %d of %d: pos: %d,%d size: %dx%d encoding: %d",
+					  i + 1, nrects, x, y, w, h, encoding_type);
+        v2r_log_info("encoding_type = %d", encoding_type);
 		switch (encoding_type) {
 		case RFB_ENCODING_RAW:
 			if (v2r_vnc_process_raw_encoding(v, x, y, w, h) == -1) {
@@ -554,19 +554,7 @@ fail:
 static int
 v2r_vnc_process_bell(v2r_vnc_t *v)
 {
-	v2r_log_debug("server ring a bell");
-
-	/* The value of duration 300 and frequency 200 sounds comfortable for a
-	 * bell ring, it can be changed. ant if you change duration too small it
-	 * will be very diffcult to find out there is a bell ring */
-	if (v2r_rdp_send_play_sound(v->session->rdp, 300, 200) == -1) {
-		goto fail;
-	}
-
 	return 0;
-
-fail:
-	return -1;
 }
 
 static int
@@ -598,7 +586,7 @@ v2r_vnc_process(v2r_vnc_t *v)
 		goto fail;
 	}
 	V2R_PACKET_READ_UINT8(v->packet, msg_type);
-
+    v2r_log_info("msg_type = %d", msg_type);
 	switch (msg_type) {
 	case RFB_FRAMEBUFFER_UPDATE:
 		if (v2r_vnc_process_framebuffer_update(v) == -1) {
@@ -621,12 +609,12 @@ v2r_vnc_process(v2r_vnc_t *v)
 		}
 		break;
 	default:
-		v2r_log_debug("reveive unknown message type %d from vnc server",
+		v2r_log_info("reveive unknown message type %d from vnc server",
 					  msg_type);
 		goto fail;
 		break;
 	}
-
+    v2r_log_info("v2r_vnc_process_server_cut_text() here is call");
 	return 0;
 
 fail:
